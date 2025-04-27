@@ -1,77 +1,70 @@
 #!/usr/bin/env python3
 import os
 import sys
-import asyncio
 import pika
 import json
 import grpc
 
-# Ajusta o path para importar WebSocket e MicroServico corretamente
-dirs = []
+# Ajusta o path para importar os stubs gRPC
 current_dir = os.path.dirname(os.path.abspath(__file__))
 backend_dir = os.path.dirname(current_dir)
-micro_dir = os.path.join(backend_dir, 'MicroServico')
-ws_dir = os.path.join(backend_dir, 'WebSocket')
-for d in [backend_dir, micro_dir, ws_dir]:
-    if d not in sys.path:
-        sys.path.insert(0, d)
+sys.path.insert(0, backend_dir)
 
 import service_pb2
 import service_pb2_grpc
-from websocket_server import enviar_dados_para_todos
 
-# Configuração RabbitMQ
-connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-channel = connection.channel()
+# Conexão RabbitMQ e fila de comandos
+conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+channel = conn.channel()
 channel.queue_declare(queue='dados_sensores')
 
-# Stub gRPC
+# Stub gRPC (ControlarArCondicionado)
 stub = None
-
-import grpc
-from grpc import FutureTimeoutError
 
 def conectar_grpc():
     global stub
-    channel = grpc.insecure_channel('localhost:5100')
+    grpc_channel = grpc.insecure_channel('localhost:5100')
     try:
-        # aguarda até 5s pela conexão
-        grpc.channel_ready_future(channel).result(timeout=5)
-    except FutureTimeoutError:
-        print("[MIDDLEWARE] gRPC não está disponível em localhost:5100")
+        grpc.channel_ready_future(grpc_channel).result(timeout=5)
+    except Exception:
+        print("[MIDDLEWARE] Não conectou ao gRPC em localhost:5100")
         return False
-    stub = service_pb2_grpc.AmbienteServiceStub(channel)
+    stub = service_pb2_grpc.AmbienteServiceStub(grpc_channel)
     print("[MIDDLEWARE] Conectado ao gRPC em localhost:5100")
     return True
 
-
-# Callback para mensagens da fila
-def callback(ch, method, properties, body):
+def on_message(ch, method, properties, body):
     dados = json.loads(body)
-    if stub is None:
-        if not conectar_grpc():
-            return  # pula essa mensagem, tentará novamente na próxima
+    sala_id = dados.get('sala_id')
+    comando  = dados.get('comando')
+
+    # só processa se vier um comando válido
+    if not isinstance(sala_id, int) or comando not in ('ligar', 'desligar'):
+        return
+
+    if stub is None and not conectar_grpc():
+        return
 
     try:
-        # Faz chamada gRPC para controlar o AC
         req = service_pb2.ControleArRequest(
-            sala_id=dados['sala_id'],
-            comando=dados.get('comando', '')
+            sala_id=sala_id,
+            comando=comando
         )
         resp = stub.ControlarArCondicionado(req)
-        print(f"[MIDDLEWARE] Resposta gRPC: {resp.status}")
-
-        # Envia atualizações via WebSocket de forma síncrona
-        asyncio.run(enviar_dados_para_todos({
-            'sala_id': dados['sala_id'],
-            'temperatura': dados.get('temperatura'),
-            'presenca': dados.get('presenca'),
-            'ar_condicionado': dados.get('comando')
-        }))
-
+        print(f"[MIDDLEWARE] gRPC respondeu: {resp.status} para sala {sala_id}")
     except Exception as e:
-        print(f"[MIDDLEWARE] Erro ao processar: {e}")
+        print(f"[MIDDLEWARE] Erro na chamada gRPC: {e}")
 
-print("[MIDDLEWARE] Escutando a fila 'dados_sensores'...")
-channel.basic_consume(queue='dados_sensores', on_message_callback=callback, auto_ack=True)
-channel.start_consuming()
+print("[MIDDLEWARE] Consumindo fila 'dados_sensores' (comandos)...")
+channel.basic_consume(
+    queue='dados_sensores',
+    on_message_callback=on_message,
+    auto_ack=True
+)
+
+try:
+    channel.start_consuming()
+except KeyboardInterrupt:
+    print("[MIDDLEWARE] Encerrado pelo usuário")
+    channel.stop_consuming()
+    conn.close()
