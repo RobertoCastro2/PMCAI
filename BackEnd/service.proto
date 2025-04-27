@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package smartcampus;
+
+// Define o serviço gRPC
+service AmbienteService {
+    rpc ObterDadosAmbiente (AmbienteRequest) returns (AmbienteResponse);
+    rpc ControlarArCondicionado (ControleArRequest) returns (ControleArResponse);
+}
+
+// Definição das mensagens de solicitação e resposta
+
+message AmbienteRequest {
+    int32 sala_id = 1;
+}
+
+message AmbienteResponse {
+    string nome = 1;
+    float temperatura = 2;
+    bool presenca = 3;
+    string ar_condicionado = 4;
+}
+
+message ControleArRequest {
+    int32 sala_id = 1;
+    string comando = 2;  // Comandos podem ser "ligar" ou "desligar"
+}
+
+message ControleArResponse {
+    string status = 1;  // Retorna o status do ar-condicionado
+}
